@@ -12,6 +12,7 @@ A .NET RPC framework built on [WatsonTcp](https://github.com/jchristn/WatsonTcp)
 - **Concurrent in-flight requests** — the client correlates replies to pending calls using a per-message GUID; multiple requests can be in flight simultaneously
 - **DI-first** — integrates with `Microsoft.Extensions.DependencyInjection`
 - **Efficient serialization** — [Nerdbank.MessagePack](https://github.com/AArnott/Nerdbank.MessagePack) (binary MessagePack format) via compile-time PolyType source generation
+- **Authentication** *(opt-in)* — configure a 16-character `PresharedKey` on server and client; the server raises `AuthenticationSucceeded`/`AuthenticationFailed` events and exposes `ClientConnected`/`ClientDisconnected` lifecycle events
 - **Polly resilience** *(opt-in)* — attach any [Polly v8](https://github.com/App-vNext/Polly) `ResiliencePipeline` (retry, circuit breaker, timeout) to `RpcClientOptions`
 - **Durable outbox** *(opt-in)* — `DurableRpcClient` persists requests to a [Stellar.FastDB](https://github.com/stonstad/Stellar.FastDB) outbox before sending; entries are removed on success and replayed on reconnect for at-least-once delivery
 
@@ -117,6 +118,73 @@ catch (RpcException ex)
     Console.WriteLine(ex.Message);             // server exception message
     Console.WriteLine(ex.RemoteExceptionType); // e.g. "System.InvalidOperationException"
 }
+```
+
+---
+
+## Authentication
+
+RpcWatsonTcp exposes WatsonTcp's built-in preshared-key authentication as a first-class opt-in feature.
+
+> **Key constraint:** WatsonTcp requires the preshared key to be **exactly 16 characters**.
+
+### Preshared key
+
+Set the same `PresharedKey` on both the server and the client. The server will reject any client that presents the wrong key or no key at all.
+
+```csharp
+// Server — requires all clients to authenticate
+services.AddRpcServer(opt =>
+{
+    opt.IpAddress = "0.0.0.0";
+    opt.Port = 9000;
+    opt.PresharedKey = "my16charpassword"; // exactly 16 chars
+});
+
+// Client — provides the matching key during the WatsonTcp handshake
+var client = new RpcClient(new RpcClientOptions
+{
+    ServerIpAddress = "127.0.0.1",
+    ServerPort = 9000,
+    PresharedKey = "my16charpassword"
+});
+
+// Wait for the async handshake before sending RPCs.
+var authReady = new TaskCompletionSource<bool>();
+client.AuthenticationSucceeded += (_, _) => authReady.TrySetResult(true);
+client.Connect();
+await authReady.Task;
+```
+
+Leave `PresharedKey` as `null` (the default) to allow unauthenticated connections.
+
+### Connection lifecycle and auth events
+
+`RpcServer` exposes four events:
+
+| Event | Type | Raised when |
+|---|---|---|
+| `ClientConnected` | `RpcClientConnectedEventArgs` | A client establishes a connection (after successful auth, if a key is configured) |
+| `ClientDisconnected` | `RpcClientDisconnectedEventArgs` | A client disconnects; `Reason` is `AuthFailure` when authentication failed |
+| `AuthenticationSucceeded` | `RpcAuthenticationSucceededEventArgs` | A client supplied the correct preshared key |
+| `AuthenticationFailed` | `RpcAuthenticationFailedEventArgs` | A client supplied the wrong preshared key |
+
+`RpcClient` exposes two events:
+
+| Event | Raised when |
+|---|---|
+| `AuthenticationSucceeded` | The server confirmed the client's preshared key |
+| `AuthenticationFailed` | The server rejected the client's preshared key |
+
+```csharp
+server.ClientConnected += (_, e) =>
+    Console.WriteLine($"Client {e.IpPort} connected ({e.ClientGuid})");
+
+server.ClientDisconnected += (_, e) =>
+    Console.WriteLine($"Client {e.IpPort} disconnected: {e.Reason}");
+
+server.AuthenticationFailed += (_, e) =>
+    Console.WriteLine($"Auth failure from {e.IpPort}");
 ```
 
 ---

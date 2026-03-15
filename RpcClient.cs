@@ -19,10 +19,27 @@ namespace RpcWatsonTcp
         {
             _pipeline = options.ResiliencePipeline;
             _tcpClient = new WatsonTcpClient(options.ServerIpAddress, options.ServerPort);
+
+            if (options.PresharedKey is not null)
+            {
+                if (options.PresharedKey.Length != 16)
+                    throw new ArgumentException("PresharedKey must be exactly 16 characters.", nameof(options));
+                _tcpClient.Settings.PresharedKey = options.PresharedKey;
+                _tcpClient.Callbacks.AuthenticationRequested = () => options.PresharedKey;
+            }
+
             _tcpClient.Events.MessageReceived += OnMessageReceived;
+            _tcpClient.Events.AuthenticationSucceeded += OnAuthenticationSucceeded;
+            _tcpClient.Events.AuthenticationFailure += OnAuthenticationFailed;
         }
 
         public void Connect() => _tcpClient.Connect();
+
+        /// <summary>Raised when the server confirms this client's preshared key is correct.</summary>
+        public event EventHandler? AuthenticationSucceeded;
+
+        /// <summary>Raised when the server rejects this client's preshared key.</summary>
+        public event EventHandler? AuthenticationFailed;
 
         /// <summary>
         /// Sends <paramref name="request"/> to the server and returns the typed reply.
@@ -99,6 +116,12 @@ namespace RpcWatsonTcp
         internal Task SendRawAsync(byte[] envelopeBytes) =>
             _tcpClient.SendAsync(envelopeBytes);
 
+        private void OnAuthenticationSucceeded(object? sender, EventArgs e) =>
+            AuthenticationSucceeded?.Invoke(this, EventArgs.Empty);
+
+        private void OnAuthenticationFailed(object? sender, EventArgs e) =>
+            AuthenticationFailed?.Invoke(this, EventArgs.Empty);
+
         private void OnMessageReceived(object? sender, MessageReceivedEventArgs e)
         {
             RpcEnvelope envelope;
@@ -122,6 +145,8 @@ namespace RpcWatsonTcp
                 return;
 
             _tcpClient.Events.MessageReceived -= OnMessageReceived;
+            _tcpClient.Events.AuthenticationSucceeded -= OnAuthenticationSucceeded;
+            _tcpClient.Events.AuthenticationFailure -= OnAuthenticationFailed;
 
             foreach (var tcs in _pending.Values)
                 tcs.TrySetCanceled();
