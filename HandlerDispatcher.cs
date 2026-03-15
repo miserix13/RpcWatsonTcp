@@ -10,25 +10,23 @@ namespace RpcWatsonTcp
     {
         Task<(byte[] Payload, bool IsError)> DispatchAsync(
             byte[] requestPayload,
-            ITypeShapeProvider shapes,
             CancellationToken cancellationToken);
     }
 
     internal sealed class HandlerDispatcher<TRequest, TReply>(IHandler<TRequest, TReply> handler)
         : IHandlerDispatcher
-        where TRequest : IRequest
-        where TReply : IReply
+        where TRequest : IRequest, IShapeable<TRequest>
+        where TReply : IReply, IShapeable<TReply>
     {
         public async Task<(byte[] Payload, bool IsError)> DispatchAsync(
             byte[] requestPayload,
-            ITypeShapeProvider shapes,
             CancellationToken cancellationToken)
         {
             try
             {
-                TRequest request = RpcSerializer.Deserialize<TRequest>(requestPayload, shapes);
+                TRequest request = RpcSerializer.Deserialize<TRequest>(requestPayload);
                 TReply reply = await handler.HandleAsync(request, cancellationToken);
-                return (RpcSerializer.Serialize(reply, shapes), false);
+                return (RpcSerializer.Serialize(reply), false);
             }
             catch (Exception ex)
             {

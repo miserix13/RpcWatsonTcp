@@ -10,12 +10,10 @@ namespace RpcWatsonTcp
     public sealed class RpcClient : IAsyncDisposable
     {
         private readonly WatsonTcpClient _tcpClient;
-        private readonly ITypeShapeProvider _shapes;
         private readonly ConcurrentDictionary<Guid, TaskCompletionSource<RpcEnvelope>> _pending = new();
 
-        public RpcClient(RpcClientOptions options, ITypeShapeProvider shapes)
+        public RpcClient(RpcClientOptions options)
         {
-            _shapes = shapes;
             _tcpClient = new WatsonTcpClient(options.ServerIpAddress, options.ServerPort);
             _tcpClient.Events.MessageReceived += OnMessageReceived;
         }
@@ -24,13 +22,15 @@ namespace RpcWatsonTcp
 
         /// <summary>
         /// Sends <paramref name="request"/> to the server and returns the typed reply.
+        /// <typeparamref name="TRequest"/> and <typeparamref name="TReply"/> must be annotated
+        /// with <c>[GenerateShape]</c> from PolyType so Nerdbank.MessagePack can serialize them.
         /// </summary>
         /// <exception cref="RpcException">Thrown when the server handler raises an exception.</exception>
         public async Task<TReply> SendAsync<TRequest, TReply>(
             TRequest request,
             CancellationToken cancellationToken = default)
-            where TRequest : IRequest
-            where TReply : IReply
+            where TRequest : IRequest, IShapeable<TRequest>
+            where TReply : IReply, IShapeable<TReply>
         {
             var messageId = Guid.NewGuid();
             var tcs = new TaskCompletionSource<RpcEnvelope>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -50,7 +50,7 @@ namespace RpcWatsonTcp
                 {
                     MessageId = messageId,
                     TypeName = typeof(TRequest).AssemblyQualifiedName!,
-                    Payload = RpcSerializer.Serialize(request, _shapes),
+                    Payload = RpcSerializer.Serialize(request),
                     IsError = false
                 };
 
@@ -64,7 +64,7 @@ namespace RpcWatsonTcp
                     throw new RpcException(error);
                 }
 
-                return RpcSerializer.Deserialize<TReply>(reply.Payload, _shapes);
+                return RpcSerializer.Deserialize<TReply>(reply.Payload);
             }
             finally
             {

@@ -3,7 +3,6 @@ using PolyType;
 
 namespace RpcWatsonTcp
 {
-    [MessagePackObject]
     [GenerateShape]
     public partial class RpcEnvelope
     {

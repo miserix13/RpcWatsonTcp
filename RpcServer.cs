@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using PolyType;
 using WatsonTcp;
 
@@ -13,17 +14,11 @@ namespace RpcWatsonTcp
         private readonly WatsonTcpServer _tcpServer;
         private readonly IHandlerRegistry _registry;
         private readonly IServiceProvider _serviceProvider;
-        private readonly ITypeShapeProvider _shapes;
 
-        public RpcServer(
-            RpcServerOptions options,
-            IHandlerRegistry registry,
-            IServiceProvider serviceProvider,
-            ITypeShapeProvider shapes)
+        public RpcServer(RpcServerOptions options, IServiceProvider serviceProvider)
         {
-            _registry = registry;
             _serviceProvider = serviceProvider;
-            _shapes = shapes;
+            _registry = serviceProvider.GetRequiredService<IHandlerRegistry>();
             _tcpServer = new WatsonTcpServer(options.IpAddress, options.Port);
             _tcpServer.Events.MessageReceived += OnMessageReceived;
         }
@@ -63,7 +58,7 @@ namespace RpcWatsonTcp
                     throw new InvalidOperationException($"No handler registered for '{requestEnvelope.TypeName}'.");
 
                 (replyPayload, isError) = await dispatcher.DispatchAsync(
-                    requestEnvelope.Payload, _shapes, CancellationToken.None);
+                    requestEnvelope.Payload, CancellationToken.None);
             }
             catch (Exception ex)
             {

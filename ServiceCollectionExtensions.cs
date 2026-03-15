@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using PolyType;
 
 namespace RpcWatsonTcp
@@ -11,8 +12,7 @@ namespace RpcWatsonTcp
         /// </summary>
         public static IServiceCollection AddRpcServer(
             this IServiceCollection services,
-            Action<RpcServerOptions> configure,
-            ITypeShapeProvider shapes)
+            Action<RpcServerOptions> configure)
         {
             var options = new RpcServerOptions();
             configure(options);
@@ -21,7 +21,6 @@ namespace RpcWatsonTcp
             services.AddSingleton<DependencyInjectionHandlerRegistry>();
             services.AddSingleton<IHandlerRegistry>(sp =>
                 sp.GetRequiredService<DependencyInjectionHandlerRegistry>());
-            services.AddSingleton(shapes);
             services.AddSingleton<RpcServer>();
 
             return services;
@@ -32,14 +31,12 @@ namespace RpcWatsonTcp
         /// </summary>
         public static IServiceCollection AddRpcClient(
             this IServiceCollection services,
-            Action<RpcClientOptions> configure,
-            ITypeShapeProvider shapes)
+            Action<RpcClientOptions> configure)
         {
             var options = new RpcClientOptions();
             configure(options);
 
             services.AddSingleton(options);
-            services.AddSingleton(shapes);
             services.AddSingleton<RpcClient>();
 
             return services;
@@ -47,19 +44,20 @@ namespace RpcWatsonTcp
 
         /// <summary>
         /// Registers a handler for <typeparamref name="TRequest"/> → <typeparamref name="TReply"/>.
+        /// Both types must be annotated with <c>[GenerateShape]</c> from PolyType.
         /// Must be called after <see cref="AddRpcServer"/>.
         /// </summary>
         public static IServiceCollection AddRpcHandler<TRequest, TReply, THandler>(
             this IServiceCollection services)
-            where TRequest : IRequest
-            where TReply : IReply
+            where TRequest : IRequest, IShapeable<TRequest>
+            where TReply : IReply, IShapeable<TReply>
             where THandler : class, IHandler<TRequest, TReply>
         {
             services.AddTransient<THandler>();
             services.AddTransient<IHandler<TRequest, TReply>>(sp => sp.GetRequiredService<THandler>());
             services.AddTransient<HandlerDispatcher<TRequest, TReply>>();
 
-            // Register the request→dispatcher mapping on the registry singleton.
+            // Capture the registration action to apply to the registry singleton after build.
             services.AddSingleton<Action<DependencyInjectionHandlerRegistry>>(r =>
                 r.Register<TRequest, TReply, THandler>());
 

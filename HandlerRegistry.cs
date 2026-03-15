@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using PolyType;
 
 namespace RpcWatsonTcp
@@ -13,8 +14,8 @@ namespace RpcWatsonTcp
         private readonly Dictionary<Type, Type> _dispatcherTypes = [];
 
         public void Register<TRequest, TReply, THandler>()
-            where TRequest : IRequest
-            where TReply : IReply
+            where TRequest : IRequest, IShapeable<TRequest>
+            where TReply : IReply, IShapeable<TReply>
             where THandler : class, IHandler<TRequest, TReply>
         {
             _dispatcherTypes[typeof(TRequest)] = typeof(HandlerDispatcher<TRequest, TReply>);

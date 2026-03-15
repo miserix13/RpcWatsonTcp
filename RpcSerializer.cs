@@ -10,10 +10,11 @@ namespace RpcWatsonTcp
     {
         private static readonly MessagePackSerializer _serializer = new();
 
-        // ── Envelope (library-owned type; uses generated IShapeable<RpcEnvelope>) ──
+        // ── Envelope (library-owned type; implements IShapeable<RpcEnvelope> via [GenerateShape]) ──
 
         public static byte[] SerializeEnvelope(RpcEnvelope envelope) =>
-            _serializer.Serialize(envelope);
+            _serializer.Serialize(in envelope)
+            ?? throw new InvalidOperationException("Serialized RpcEnvelope produced null bytes.");
 
         public static RpcEnvelope DeserializeEnvelope(byte[] data) =>
             _serializer.Deserialize<RpcEnvelope>(data)
@@ -22,19 +23,21 @@ namespace RpcWatsonTcp
         // ── Error reply (library-owned type) ──
 
         public static byte[] SerializeErrorReply(RpcErrorReply error) =>
-            _serializer.Serialize(error);
+            _serializer.Serialize(in error)
+            ?? throw new InvalidOperationException("Serialized RpcErrorReply produced null bytes.");
 
         public static RpcErrorReply DeserializeErrorReply(byte[] data) =>
             _serializer.Deserialize<RpcErrorReply>(data)
             ?? throw new InvalidOperationException("Received null error reply.");
 
-        // ── User-defined request / reply types (shapes provided at runtime) ──
+        // ── User-defined request / reply types (T must implement IShapeable<T> via [GenerateShape]) ──
 
-        public static byte[] Serialize<T>(T value, ITypeShapeProvider provider) =>
-            _serializer.Serialize(value, provider);
+        public static byte[] Serialize<T>(T value) where T : IShapeable<T> =>
+            _serializer.Serialize(in value)
+            ?? throw new InvalidOperationException($"Serialized {typeof(T).Name} produced null bytes.");
 
-        public static T Deserialize<T>(byte[] data, ITypeShapeProvider provider) =>
-            _serializer.Deserialize<T>(data, provider)
+        public static T Deserialize<T>(byte[] data) where T : IShapeable<T> =>
+            _serializer.Deserialize<T>(data)
             ?? throw new InvalidOperationException($"Deserialized null value for type {typeof(T).Name}.");
     }
 }
