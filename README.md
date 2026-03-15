@@ -1,6 +1,6 @@
 # RpcWatsonTcp
 
-A .NET RPC framework built on [WatsonTcp](https://github.com/jchristn/WatsonTcp) and [Nerdbank.MessagePack](https://github.com/AArnott/Nerdbank.MessagePack). It lets you define strongly-typed request/reply pairs, implement handlers for them, and call them from a client over TCP — with errors propagated cleanly back to the caller.
+A .NET RPC framework built on [WatsonTcp](https://github.com/jchristn/WatsonTcp) and [Nerdbank.MessagePack](https://github.com/AArnott/Nerdbank.MessagePack). It lets you define strongly-typed request/reply pairs, implement handlers for them, and call them from a client over TCP — with errors propagated cleanly back to the caller, optional Polly resilience pipelines, and opt-in durable delivery via a Stellar.FastDB outbox.
 
 ---
 
@@ -12,6 +12,8 @@ A .NET RPC framework built on [WatsonTcp](https://github.com/jchristn/WatsonTcp)
 - **Concurrent in-flight requests** — the client correlates replies to pending calls using a per-message GUID; multiple requests can be in flight simultaneously
 - **DI-first** — integrates with `Microsoft.Extensions.DependencyInjection`
 - **Efficient serialization** — [Nerdbank.MessagePack](https://github.com/AArnott/Nerdbank.MessagePack) (binary MessagePack format) via compile-time PolyType source generation
+- **Polly resilience** *(opt-in)* — attach any [Polly v8](https://github.com/App-vNext/Polly) `ResiliencePipeline` (retry, circuit breaker, timeout) to `RpcClientOptions`
+- **Durable outbox** *(opt-in)* — `DurableRpcClient` persists requests to a [Stellar.FastDB](https://github.com/stonstad/Stellar.FastDB) outbox before sending; entries are removed on success and replayed on reconnect for at-least-once delivery
 
 ---
 
@@ -112,9 +114,94 @@ try
 }
 catch (RpcException ex)
 {
-    Console.WriteLine(ex.Message);           // server exception message
+    Console.WriteLine(ex.Message);             // server exception message
     Console.WriteLine(ex.RemoteExceptionType); // e.g. "System.InvalidOperationException"
 }
+```
+
+---
+
+## Resilience with Polly
+
+Attach any Polly v8 `ResiliencePipeline` to `RpcClientOptions.ResiliencePipeline`. Every `SendAsync` call is then wrapped in that pipeline, enabling automatic retries, circuit breakers, and timeouts.
+
+```csharp
+using Polly;
+using Polly.Retry;
+
+var pipeline = new ResiliencePipelineBuilder()
+    .AddRetry(new RetryStrategyOptions
+    {
+        MaxRetryAttempts = 3,
+        Delay = TimeSpan.FromMilliseconds(200),
+        ShouldHandle = new PredicateBuilder().Handle<RpcException>()
+    })
+    .AddTimeout(TimeSpan.FromSeconds(5))
+    .Build();
+
+var client = new RpcClient(new RpcClientOptions
+{
+    ServerIpAddress = "127.0.0.1",
+    ServerPort = 9000,
+    ResiliencePipeline = pipeline   // attach here
+});
+client.Connect();
+```
+
+The pipeline is **opt-in** — when `ResiliencePipeline` is `null` (the default), requests are sent without any wrapping.
+
+---
+
+## Durable Delivery
+
+`DurableRpcClient` adds an at-least-once outbox on top of a regular `RpcClient`. Requests sent with `SendOptions.Durable` are written to a [Stellar.FastDB](https://github.com/stonstad/Stellar.FastDB) file before transmission and removed only after a successful reply. On startup, any entries left in the outbox (from a previous crash or disconnect) are replayed.
+
+> **Idempotency note:** Durable delivery is at-least-once — a server handler may receive the same request more than once if the client crashed after the server processed it but before the outbox entry was deleted. Design handlers to be idempotent where possible.
+
+### Direct construction
+
+```csharp
+using RpcWatsonTcp;
+
+await using var durableClient = new DurableRpcClient(
+    inner: new RpcClient(new RpcClientOptions { ServerIpAddress = "127.0.0.1", ServerPort = 9000 }),
+    options: new DurableRpcClientOptions
+    {
+        OutboxPath = "my_service_outbox",   // directory that will hold the FastDB files
+        DrainOnConnect = true               // replay persisted messages on startup
+    });
+
+await durableClient.ConnectAsync();
+
+// Non-durable call — same behaviour as RpcClient.SendAsync
+GetUserReply reply1 = await durableClient.SendAsync<GetUserRequest, GetUserReply>(request);
+
+// Durable call — persisted before send, deleted on success
+GetUserReply reply2 = await durableClient.SendAsync<GetUserRequest, GetUserReply>(
+    request, SendOptions.Durable);
+```
+
+### Dependency injection
+
+```csharp
+services.AddDurableRpcClient(
+    configureClient: opt =>
+    {
+        opt.ServerIpAddress = "127.0.0.1";
+        opt.ServerPort = 9000;
+    },
+    configureDurable: opt =>
+    {
+        opt.OutboxPath = "my_service_outbox";
+        opt.DrainOnConnect = true;
+    });
+```
+
+### Manual drain
+
+```csharp
+// Replay all pending outbox entries after re-establishing a connection
+await durableClient.DrainOutboxAsync();
 ```
 
 ---
@@ -123,16 +210,24 @@ catch (RpcException ex)
 
 ```
 RpcClient.SendAsync<TRequest, TReply>(request)
+  ↓  [optional] ResiliencePipeline wraps the call
   ↓  serializes RpcEnvelope { MessageId, TypeName, Payload }
   ↓  WatsonTcpClient ──── TCP ────► WatsonTcpServer
-                                          ↓ RpcServer dispatches by TypeName
-                                    HandlerDispatcher<TRequest, TReply>
-                                          ↓ resolves IHandler via IServiceProvider
-                                    IHandler<TRequest, TReply>.HandleAsync(request)
-                                          ↓ reply or RpcErrorReply on exception
+                                         ↓ RpcServer dispatches by TypeName
+                                   HandlerDispatcher<TRequest, TReply>
+                                         ↓ resolves IHandler via IServiceProvider
+                                   IHandler<TRequest, TReply>.HandleAsync(request)
+                                         ↓ reply or RpcErrorReply on exception
   ↑  WatsonTcpClient ◄─── TCP ───── WatsonTcpServer
   ↓  completes TaskCompletionSource keyed by MessageId
 returns TReply  (or throws RpcException)
+
+
+DurableRpcClient.SendAsync(..., SendOptions.Durable)
+  ↓  persist RpcEnvelope → Stellar.FastDB outbox
+  ↓  delegate to RpcClient.SendAsync  (pipeline applies here too)
+  ↓  on success → delete outbox entry
+  ↑  on failure → entry stays; DrainOutboxAsync replays on reconnect
 ```
 
 Every message on the wire is an `RpcEnvelope` — a MessagePack-serialized wrapper containing:

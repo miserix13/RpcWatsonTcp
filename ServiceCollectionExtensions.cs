@@ -75,5 +75,28 @@ namespace RpcWatsonTcp
             foreach (var apply in registrations)
                 apply(registry);
         }
+
+        /// <summary>
+        /// Registers an <see cref="RpcClient"/> together with a <see cref="DurableRpcClient"/>
+        /// backed by a Stellar.FastDB outbox. Use <see cref="SendOptions.Durable"/> at the call
+        /// site to opt individual requests into durable delivery.
+        /// </summary>
+        public static IServiceCollection AddDurableRpcClient(
+            this IServiceCollection services,
+            Action<RpcClientOptions> configureClient,
+            Action<DurableRpcClientOptions>? configureDurable = null)
+        {
+            var clientOptions = new RpcClientOptions();
+            configureClient(clientOptions);
+            services.AddSingleton(clientOptions);
+            services.AddSingleton<RpcClient>();
+
+            var durableOptions = new DurableRpcClientOptions();
+            configureDurable?.Invoke(durableOptions);
+            services.AddSingleton(durableOptions);
+            services.AddSingleton<DurableRpcClient>();
+
+            return services;
+        }
     }
 }
