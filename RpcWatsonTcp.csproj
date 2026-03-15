@@ -17,8 +17,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Exclude the nested test project from this project's compilation glob. -->
+    <!-- Exclude nested sub-projects from this project's compilation glob. -->
     <Compile Remove="RpcWatsonTcp.Tests/**" />
+    <Compile Remove="RpcWatsonTcp.Benchmarks/**" />
   </ItemGroup>
 
   <ItemGroup>
@@ -28,6 +29,9 @@
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>RpcWatsonTcp.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>RpcWatsonTcp.Benchmarks</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
 

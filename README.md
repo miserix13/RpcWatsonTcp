@@ -241,6 +241,47 @@ Every message on the wire is an `RpcEnvelope` — a MessagePack-serialized wrapp
 
 ---
 
+## Performance
+
+Benchmarks run on a loopback connection using [BenchmarkDotNet](https://benchmarkdotnet.org/) in Release mode. Source is in `RpcWatsonTcp.Benchmarks/`.
+
+```bash
+dotnet run --project RpcWatsonTcp.Benchmarks -c Release -- --filter "*"
+```
+
+### Round-trip latency (single client ↔ server, loopback)
+
+| Payload | Mean | Error |
+|---|--:|--:|
+| Small (16 B) | 1,635 µs | ±119 µs |
+| Medium (256 B) | 1,934 µs | ±548 µs |
+| Large (4 KB) | 1,899 µs | ±526 µs |
+
+Latency is dominated by TCP round-trip overhead. Payload size has a negligible effect.
+
+### Serializer throughput (Nerdbank.MessagePack, single-threaded)
+
+| Operation | Mean | Error |
+|---|--:|--:|
+| Serialize small request | 1.4 µs | ±0.07 µs |
+| Serialize large request (4 KB) | 2.3 µs | ±0.51 µs |
+| Serialize RpcEnvelope | 2.4 µs | ±0.55 µs |
+| Deserialize small request | 2.1 µs | ±0.12 µs |
+| Deserialize large request (4 KB) | 3.7 µs | ±0.72 µs |
+| Deserialize RpcEnvelope | 3.7 µs | ±0.16 µs |
+
+### Concurrent throughput (N simultaneous round-trips)
+
+| Concurrency | Total time | Mean per request |
+|--:|--:|--:|
+| 1 | 1,712 µs | 1,712 µs |
+| 10 | 13,663 µs | ~1,366 µs |
+| 50 | 58,041 µs | ~1,161 µs |
+
+Throughput-per-request improves under concurrency as TCP round-trips overlap.
+
+---
+
 ## Building & Testing
 
 ```bash
