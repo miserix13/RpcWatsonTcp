@@ -12,7 +12,7 @@ A .NET RPC framework built on [WatsonTcp](https://github.com/jchristn/WatsonTcp)
 - **Concurrent in-flight requests** — the client correlates replies to pending calls using a per-message GUID; multiple requests can be in flight simultaneously
 - **DI-first** — integrates with `Microsoft.Extensions.DependencyInjection`
 - **Efficient serialization** — [Nerdbank.MessagePack](https://github.com/AArnott/Nerdbank.MessagePack) (binary MessagePack format) via compile-time PolyType source generation
-- **Authentication** *(opt-in)* — configure a 16-character `PresharedKey` on server and client; the server raises `AuthenticationSucceeded`/`AuthenticationFailed` events and exposes `ClientConnected`/`ClientDisconnected` lifecycle events
+- **Authentication** *(opt-in)* — define any credential type with `[GenerateShape]`, implement `IRpcAuthenticator<TCredential>`, register with `AddRpcAuthentication<TCredential, TAuthenticator>()`; the client sends credentials over the application layer immediately after connecting; `SendAsync` gates on the handshake automatically
 - **Polly resilience** *(opt-in)* — attach any [Polly v8](https://github.com/App-vNext/Polly) `ResiliencePipeline` (retry, circuit breaker, timeout) to `RpcClientOptions`
 - **Durable outbox** *(opt-in)* — `DurableRpcClient` persists requests to a [Stellar.FastDB](https://github.com/stonstad/Stellar.FastDB) outbox before sending; entries are removed on success and replayed on reconnect for at-least-once delivery
 
@@ -307,11 +307,20 @@ await durableClient.DrainOutboxAsync();
 ## Architecture
 
 ```
+RpcClient.ConnectAsync()  (when CredentialProvider is set)
+  ↓  WatsonTcpClient connects
+  ↓  sends RpcEnvelope { IsAuth=true, TypeName=credentialType, Payload=serialized credential }
+  ↑  server calls IRpcAuthenticator<TCredential>.AuthenticateAsync(credential)
+  ↑  replies RpcEnvelope { IsAuth=true, IsError=false/true }
+  ↓  client _authReady task completes → AuthenticationSucceeded/Failed event fires
+
 RpcClient.SendAsync<TRequest, TReply>(request)
+  ↓  awaits _authReady (no-op when no credentials configured)
   ↓  [optional] ResiliencePipeline wraps the call
   ↓  serializes RpcEnvelope { MessageId, TypeName, Payload }
   ↓  WatsonTcpClient ──── TCP ────► WatsonTcpServer
-                                         ↓ RpcServer dispatches by TypeName
+                                         ↓ RpcServer checks client auth state
+                                         ↓ dispatches by TypeName
                                    HandlerDispatcher<TRequest, TReply>
                                          ↓ resolves IHandler via IServiceProvider
                                    IHandler<TRequest, TReply>.HandleAsync(request)
@@ -333,9 +342,10 @@ Every message on the wire is an `RpcEnvelope` — a MessagePack-serialized wrapp
 | Field | Type | Purpose |
 |---|---|---|
 | `MessageId` | `Guid` | Correlates a reply to its pending request |
-| `TypeName` | `string` | Assembly-qualified request/reply type name for deserialization |
-| `Payload` | `byte[]` | MessagePack-serialized request or reply |
+| `TypeName` | `string` | Assembly-qualified request/reply/credential type name for deserialization |
+| `Payload` | `byte[]` | MessagePack-serialized request, reply, or credential |
 | `IsError` | `bool` | `true` when Payload contains an `RpcErrorReply` |
+| `IsAuth` | `bool` | `true` when this envelope is part of the authentication handshake |
 
 ---
 
