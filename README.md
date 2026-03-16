@@ -451,39 +451,48 @@ dotnet run --project RpcWatsonTcp.Benchmarks -c Release -- --filter "*"
 
 | Payload | Mean | Error |
 |---|--:|--:|
-| Small (16 B) | 1,667 µs | ±142 µs |
-| Medium (256 B) | 1,628 µs | ±87 µs |
-| Large (4 KB) | 1,765 µs | ±154 µs |
+| Small (16 B) | 1,716 µs | ±123 µs |
+| Medium (256 B) | 1,718 µs | ±86 µs |
+| Large (4 KB) | 1,870 µs | ±251 µs |
 
 Latency is dominated by TCP round-trip overhead. Payload size has a negligible effect.
+
+### TLS overhead (TLS 1.2, post-handshake, small payload)
+
+| Scenario | Mean | Error | vs. baseline |
+|---|--:|--:|--:|
+| Plain TCP (baseline) | 1,721 µs | ±98 µs | — |
+| TLS 1.2 | 1,548 µs | ±52 µs | within noise |
+
+TLS overhead on an **already-established** connection is indistinguishable from measurement noise. The one-time TLS handshake cost (certificate exchange + key derivation) occurs only at `Connect()` time.
 
 ### Authentication overhead
 
 | Scenario | Mean | Error | vs. baseline |
 |---|--:|--:|--:|
-| No auth (baseline) | 1,648 µs | ±77 µs | — |
-| With auth, post-handshake | 1,671 µs | ±141 µs | +23 µs (+1.4%) |
+| No auth (baseline) | 1,552 µs | ±78 µs | — |
+| With auth, post-handshake | 1,538 µs | ±66 µs | within noise |
 
-The auth gate (`_authReady` task) adds ~23 µs of overhead per request — effectively zero overhead once the one-time credential handshake is complete at connect time.
+The auth gate (`_authReady` task) adds negligible per-request overhead once the one-time credential handshake is complete at connect time.
 
 ### Serializer throughput (Nerdbank.MessagePack, single-threaded)
 
 | Operation | Mean | Error |
 |---|--:|--:|
-| Serialize small request | 1.4 µs | ±0.10 µs |
-| Serialize large request (4 KB) | 2.3 µs | ±0.09 µs |
-| Serialize RpcEnvelope | 2.3 µs | ±0.33 µs |
-| Deserialize small request | 2.1 µs | ±0.24 µs |
-| Deserialize large request (4 KB) | 3.3 µs | ±0.26 µs |
-| Deserialize RpcEnvelope | 3.8 µs | ±0.28 µs |
+| Serialize small request | 1.4 µs | ±0.05 µs |
+| Serialize large request (4 KB) | 2.2 µs | ±0.07 µs |
+| Serialize RpcEnvelope | 2.4 µs | ±0.08 µs |
+| Deserialize small request | 2.1 µs | ±0.04 µs |
+| Deserialize large request (4 KB) | 3.7 µs | ±0.53 µs |
+| Deserialize RpcEnvelope | 4.0 µs | ±0.24 µs |
 
 ### Concurrent throughput (N simultaneous round-trips)
 
 | Concurrency | Total time | Mean per request |
 |--:|--:|--:|
-| 1 | 1,612 µs | 1,612 µs |
-| 10 | 13,516 µs | ~1,352 µs |
-| 50 | 58,339 µs | ~1,167 µs |
+| 1 | 1,759 µs | 1,759 µs |
+| 10 | 13,615 µs | ~1,362 µs |
+| 50 | 59,085 µs | ~1,182 µs |
 
 Throughput-per-request improves under concurrency as TCP round-trips overlap.
 

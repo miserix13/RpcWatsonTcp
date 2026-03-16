@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Jobs;
@@ -215,6 +217,104 @@ public class AuthenticatedRoundTripBenchmark
     {
         public Task<bool> AuthenticateAsync(BenchCredential credential, CancellationToken cancellationToken = default)
             => Task.FromResult(credential.Token == "bench-token");
+    }
+}
+
+/// <summary>
+/// Measures the per-request overhead introduced by TLS 1.2 encryption on an already-established
+/// connection, compared to a plain TCP baseline.
+/// </summary>
+[MemoryDiagnoser]
+[Config(typeof(BenchmarkConfig))]
+public class TlsRoundTripBenchmark
+{
+    private RpcServer _serverNoTls = null!;
+    private RpcServer _serverTls = null!;
+    private RpcClient _clientNoTls = null!;
+    private RpcClient _clientTls = null!;
+    private X509Certificate2 _cert = null!;
+    private static int _port = 20400;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        int portNoTls = System.Threading.Interlocked.Increment(ref _port);
+        int portTls   = System.Threading.Interlocked.Increment(ref _port);
+
+        // Self-signed cert — export+re-import with Exportable flag for SslStream on Windows.
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest(
+            "cn=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var temp = req.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+        var pfx = temp.Export(X509ContentType.Pfx);
+        _cert = X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.Exportable);
+
+        // Plain TCP server
+        var svcNoTls = new ServiceCollection();
+        svcNoTls.AddRpcServer(opt => { opt.IpAddress = "127.0.0.1"; opt.Port = portNoTls; });
+        svcNoTls.AddRpcHandler<BenchRequest, BenchReply, EchoHandler>();
+        IServiceProvider spNoTls = svcNoTls.BuildServiceProvider();
+        spNoTls.ApplyRpcHandlerRegistrations();
+        _serverNoTls = spNoTls.GetRequiredService<RpcServer>();
+        _serverNoTls.Start();
+
+        // TLS 1.2 server
+        var svcTls = new ServiceCollection();
+        svcTls.AddRpcServer(opt =>
+        {
+            opt.IpAddress = "127.0.0.1";
+            opt.Port = portTls;
+            opt.Tls = new RpcServerTlsOptions { Certificate = _cert };
+        });
+        svcTls.AddRpcHandler<BenchRequest, BenchReply, EchoHandler>();
+        IServiceProvider spTls = svcTls.BuildServiceProvider();
+        spTls.ApplyRpcHandlerRegistrations();
+        _serverTls = spTls.GetRequiredService<RpcServer>();
+        _serverTls.Start();
+
+        _clientNoTls = new RpcClient(new RpcClientOptions
+        {
+            ServerIpAddress = "127.0.0.1",
+            ServerPort = portNoTls
+        });
+        _clientNoTls.Connect();
+
+        _clientTls = new RpcClient(new RpcClientOptions
+        {
+            ServerIpAddress = "127.0.0.1",
+            ServerPort = portTls,
+            Tls = new RpcClientTlsOptions { AcceptAnyCertificate = true }
+        });
+        _clientTls.Connect();
+
+        // Warm up both connections
+        _clientNoTls.SendAsync<BenchRequest, BenchReply>(new BenchRequest { Payload = "warm" }).GetAwaiter().GetResult();
+        _clientTls.SendAsync<BenchRequest, BenchReply>(new BenchRequest { Payload = "warm" }).GetAwaiter().GetResult();
+    }
+
+    [GlobalCleanup]
+    public async Task Cleanup()
+    {
+        await _clientNoTls.DisposeAsync();
+        await _clientTls.DisposeAsync();
+        await _serverNoTls.DisposeAsync();
+        await _serverTls.DisposeAsync();
+        _cert.Dispose();
+    }
+
+    [Benchmark(Description = "Round-trip: plain TCP (baseline)")]
+    public Task<BenchReply> PlainTcp() =>
+        _clientNoTls.SendAsync<BenchRequest, BenchReply>(new BenchRequest { Payload = "hello" });
+
+    [Benchmark(Description = "Round-trip: TLS 1.2")]
+    public Task<BenchReply> WithTls() =>
+        _clientTls.SendAsync<BenchRequest, BenchReply>(new BenchRequest { Payload = "hello" });
+
+    private sealed class EchoHandler : IHandler<BenchRequest, BenchReply>
+    {
+        public Task<BenchReply> HandleAsync(BenchRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new BenchReply { Echo = request.Payload });
     }
 }
 

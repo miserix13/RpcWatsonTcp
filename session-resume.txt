@@ -1,1 +1,1 @@
-copilot --resume=830cb080-41fc-46a8-a125-210a6213d726
+copilot --resume=830cb080-41fc-46a8-a125-210a6213d726 --yolo
