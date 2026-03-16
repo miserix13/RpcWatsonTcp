@@ -66,7 +66,7 @@ public class GeneratorSnapshotTests
 
         var (sources, _) = Run(proto);
 
-        Assert.Single(sources);
+        Assert.Equal(2, sources.Count); // messages.g.cs + messages.specs.g.cs
         string src = sources[0];
         Assert.Contains("[GenerateShape]", src);
         Assert.Contains("public partial class GetUserRequest : IRequest", src);
@@ -84,7 +84,7 @@ public class GeneratorSnapshotTests
             """;
 
         var (sources, _) = Run(proto);
-        Assert.Single(sources);
+        Assert.Equal(2, sources.Count);
         Assert.Contains("public partial class GetUserReply : IReply", sources[0]);
     }
 
@@ -134,8 +134,8 @@ public class GeneratorSnapshotTests
             }
             """;
         var (sources, _) = Run(proto);
-        // Enum only — still produces a file
-        Assert.Single(sources);
+        // Enum only — emits C# file + specs file
+        Assert.Equal(2, sources.Count);
         Assert.Contains("public enum Status", sources[0]);
         Assert.Contains("Unknown = 0,", sources[0]);
         Assert.Contains("Active = 1,", sources[0]);

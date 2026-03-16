@@ -69,11 +69,31 @@ namespace RpcWatsonTcp.SourceGenerator
                 if (model.Messages.Count == 0 && model.Enums.Count == 0)
                     return; // Nothing to emit
 
-                string generatedCs = CSharpEmitter.Emit(model, ns);
-                string hintName = Path.GetFileNameWithoutExtension(protoFile.Path) + ".g.cs";
+                string baseName = Path.GetFileNameWithoutExtension(protoFile.Path);
+                string className = ToPascalCase(baseName);
 
-                spc.AddSource(hintName, SourceText.From(generatedCs, Encoding.UTF8));
+                // Emit C# message types
+                string generatedCs = CSharpEmitter.Emit(model, ns);
+                spc.AddSource(baseName + ".g.cs", SourceText.From(generatedCs, Encoding.UTF8));
+
+                // Emit specs class (OpenAPI JSON, YAML, WSDL)
+                string generatedSpecs = SpecsEmitter.Emit(model, className, ns);
+                spc.AddSource(baseName + ".specs.g.cs", SourceText.From(generatedSpecs, Encoding.UTF8));
             });
+        }
+
+        private static string ToPascalCase(string name)
+        {
+            // Convert file names like "echo", "my_messages", "my-messages" to PascalCase
+            var sb = new StringBuilder(name.Length);
+            bool upper = true;
+            foreach (char c in name)
+            {
+                if (c == '_' || c == '-' || c == '.' || c == ' ') { upper = true; continue; }
+                sb.Append(upper ? char.ToUpperInvariant(c) : c);
+                upper = false;
+            }
+            return sb.ToString();
         }
     }
 }
