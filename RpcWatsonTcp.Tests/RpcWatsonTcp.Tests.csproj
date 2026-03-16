@@ -18,7 +18,22 @@
 
   <ItemGroup>
     <ProjectReference Include="..\RpcWatsonTcp.csproj" />
+    <ProjectReference Include="..\RpcWatsonTcp.SourceGenerator\RpcWatsonTcp.SourceGenerator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="**/*.proto" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <CompilerVisibleProperty Include="RpcProtoNamespace" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <RpcProtoNamespace>RpcWatsonTcp.Tests.Generated</RpcProtoNamespace>
+  </PropertyGroup>
 
   <ItemGroup>
     <Using Include="Xunit" />

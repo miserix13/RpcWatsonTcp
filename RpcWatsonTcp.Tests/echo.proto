@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+// A round-trip smoke test for the Protobuf IDL source generator.
+// The generator will emit EchoProtoRequest (IRequest) and EchoProtoReply (IReply)
+// with [GenerateShape] so they work with Nerdbank.MessagePack serialization.
+
+message EchoProtoRequest {
+  string message = 1;
+  int32  count   = 2;
+}
+
+message EchoProtoReply {
+  string echoed = 1;
+  int32  length = 2;
+}

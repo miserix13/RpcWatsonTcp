@@ -20,6 +20,8 @@
     <!-- Exclude nested sub-projects from this project's compilation glob. -->
     <Compile Remove="RpcWatsonTcp.Tests/**" />
     <Compile Remove="RpcWatsonTcp.Benchmarks/**" />
+    <Compile Remove="RpcWatsonTcp.SourceGenerator/**" />
+    <Compile Remove="RpcWatsonTcp.SourceGenerator.Tests/**" />
   </ItemGroup>
 
   <ItemGroup>

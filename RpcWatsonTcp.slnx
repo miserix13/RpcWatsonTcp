@@ -2,4 +2,6 @@
   <Project Path="RpcWatsonTcp.csproj" />
   <Project Path="RpcWatsonTcp.Tests/RpcWatsonTcp.Tests.csproj" />
   <Project Path="RpcWatsonTcp.Benchmarks/RpcWatsonTcp.Benchmarks.csproj" />
+  <Project Path="RpcWatsonTcp.SourceGenerator/RpcWatsonTcp.SourceGenerator.csproj" />
+  <Project Path="RpcWatsonTcp.SourceGenerator.Tests/RpcWatsonTcp.SourceGenerator.Tests.csproj" />
 </Solution>
