@@ -15,6 +15,7 @@ A .NET RPC framework built on [WatsonTcp](https://github.com/jchristn/WatsonTcp)
 - **Authentication** *(opt-in)* — define any credential type with `[GenerateShape]`, implement `IRpcAuthenticator<TCredential>`, register with `AddRpcAuthentication<TCredential, TAuthenticator>()`; the client sends credentials over the application layer immediately after connecting; `SendAsync` gates on the handshake automatically
 - **Polly resilience** *(opt-in)* — attach any [Polly v8](https://github.com/App-vNext/Polly) `ResiliencePipeline` (retry, circuit breaker, timeout) to `RpcClientOptions`
 - **Durable outbox** *(opt-in)* — `DurableRpcClient` persists requests to a [Stellar.FastDB](https://github.com/stonstad/Stellar.FastDB) outbox before sending; entries are removed on success and replayed on reconnect for at-least-once delivery
+- **TLS** *(opt-in)* — set `RpcServerOptions.Tls` and `RpcClientOptions.Tls` to encrypt the transport; supports TLS 1.2 and TLS 1.3, server-only or mutual TLS (mTLS), and custom certificate validation callbacks
 
 ---
 
@@ -346,6 +347,95 @@ Every message on the wire is an `RpcEnvelope` — a MessagePack-serialized wrapp
 | `Payload` | `byte[]` | MessagePack-serialized request, reply, or credential |
 | `IsError` | `bool` | `true` when Payload contains an `RpcErrorReply` |
 | `IsAuth` | `bool` | `true` when this envelope is part of the authentication handshake |
+
+---
+
+## TLS
+
+RpcWatsonTcp supports encrypted connections via TLS 1.2 and TLS 1.3. TLS is configured independently on the server (a certificate is required) and the client (certificate validation behaviour). Plain TCP is used by default when no TLS options are set.
+
+### Server: require TLS
+
+```csharp
+services.AddRpcServer(opt =>
+{
+    opt.IpAddress = "0.0.0.0";
+    opt.Port = 9000;
+    opt.Tls = new RpcServerTlsOptions
+    {
+        PfxPath     = "/certs/server.pfx",
+        PfxPassword = "secret",
+        TlsVersion  = RpcTlsVersion.Tls12,   // or Tls13
+    };
+});
+```
+
+Or supply an `X509Certificate2` directly:
+
+```csharp
+opt.Tls = new RpcServerTlsOptions { Certificate = myCert };
+```
+
+### Client: connect over TLS
+
+```csharp
+var client = new RpcClient(new RpcClientOptions
+{
+    ServerIpAddress = "myserver.internal",
+    ServerPort = 9000,
+    Tls = new RpcClientTlsOptions
+    {
+        // Validate the server certificate against the system trust store (default):
+        AcceptAnyCertificate = false,
+
+        // Or provide a custom validation callback:
+        // ServerCertificateValidation = (_, cert, chain, errors) => errors == SslPolicyErrors.None,
+    }
+});
+```
+
+> **Development shortcut** — set `AcceptAnyCertificate = true` to skip server certificate validation. **Never use this in production.**
+
+### Mutual TLS (mTLS)
+
+To require clients to present a certificate, set `RequireClientCertificate` on the server and provide a client certificate on the client:
+
+```csharp
+// Server
+opt.Tls = new RpcServerTlsOptions
+{
+    Certificate             = serverCert,
+    RequireClientCertificate = true,
+    // Optional custom validation:
+    ClientCertificateValidation = (_, cert, chain, errors) => MyValidate(cert),
+};
+
+// Client
+opt.Tls = new RpcClientTlsOptions
+{
+    Certificate          = clientCert,   // the client's own certificate
+    AcceptAnyCertificate = false,
+};
+```
+
+### TLS + authentication
+
+TLS and application-layer authentication compose naturally — configure both:
+
+```csharp
+// Server
+services.AddRpcServer(opt => { opt.Tls = ...; });
+services.AddRpcAuthentication<ApiKeyCredential, ApiKeyAuthenticator>();
+
+// Client
+var client = new RpcClient(new RpcClientOptions
+{
+    Tls = new RpcClientTlsOptions { AcceptAnyCertificate = false },
+    CredentialProvider = new CredentialProvider<ApiKeyCredential>(
+        () => new ApiKeyCredential { Key = Environment.GetEnvironmentVariable("API_KEY") })
+});
+await client.ConnectAsync(); // establishes TLS, then sends credentials
+```
 
 ---
 

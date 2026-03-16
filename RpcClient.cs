@@ -28,7 +28,9 @@ namespace RpcWatsonTcp
         {
             _pipeline = options.ResiliencePipeline;
             _credentialProvider = options.CredentialProvider;
-            _tcpClient = new WatsonTcpClient(options.ServerIpAddress, options.ServerPort);
+            _tcpClient = options.Tls is { } tls
+                ? BuildTlsClient(options.ServerIpAddress, options.ServerPort, tls)
+                : new WatsonTcpClient(options.ServerIpAddress, options.ServerPort);
             _tcpClient.Events.MessageReceived += OnMessageReceived;
             _tcpClient.Events.ServerConnected += OnServerConnected;
 
@@ -41,6 +43,29 @@ namespace RpcWatsonTcp
             {
                 _authReady = Task.CompletedTask;
             }
+        }
+
+        private static WatsonTcpClient BuildTlsClient(string ip, int port, RpcClientTlsOptions tls)
+        {
+            WatsonTcp.TlsVersion tlsVer = tls.TlsVersion == RpcTlsVersion.Tls12
+                ? WatsonTcp.TlsVersion.Tls12
+                : WatsonTcp.TlsVersion.Tls13;
+
+            WatsonTcpClient client;
+            if (tls.Certificate is not null)
+                client = new WatsonTcpClient(ip, port, tls.Certificate, tlsVer);
+            else if (tls.PfxPath is not null)
+                client = new WatsonTcpClient(ip, port, tls.PfxPath, tls.PfxPassword ?? string.Empty, tlsVer);
+            else
+                // Basic TLS — no client certificate (server-auth only).
+                client = new WatsonTcpClient(ip, port, string.Empty, string.Empty, tlsVer);
+
+            // WatsonTcp defaults AcceptInvalidCertificates to true; explicitly honour our setting.
+            client.Settings.AcceptInvalidCertificates = tls.AcceptAnyCertificate;
+            if (!tls.AcceptAnyCertificate && tls.ServerCertificateValidation is not null)
+                client.SslConfiguration.ServerCertificateValidationCallback = tls.ServerCertificateValidation;
+
+            return client;
         }
 
         /// <summary>

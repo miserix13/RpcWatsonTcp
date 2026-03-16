@@ -22,3 +22,10 @@ public partial class ApiKeyCredential : ICredential
 {
     public string ApiKey { get; set; } = string.Empty;
 }
+
+// Credential type used in TLS+auth tests.
+[GenerateShape]
+public partial class TlsApiKeyCredential : ICredential
+{
+    public string Key { get; set; } = string.Empty;
+}

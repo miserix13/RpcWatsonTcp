@@ -24,6 +24,12 @@ namespace RpcWatsonTcp
         public ICredentialProvider? CredentialProvider { get; set; }
 
         /// <summary>
+        /// Optional TLS configuration. Must match the server's TLS setup.
+        /// Leave <see langword="null"/> for plain TCP (default).
+        /// </summary>
+        public RpcClientTlsOptions? Tls { get; set; }
+
+        /// <summary>
         /// Optional Polly v8 resilience pipeline applied to every <c>SendAsync</c> call.
         /// Configure retry, circuit breaker, timeout, or any combination:
         /// <code>

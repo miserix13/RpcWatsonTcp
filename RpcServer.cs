@@ -37,10 +37,35 @@ namespace RpcWatsonTcp
             _serviceProvider = serviceProvider;
             _registry = serviceProvider.GetRequiredService<IHandlerRegistry>();
             _credentials = serviceProvider.GetRequiredService<RpcCredentialRegistry>();
-            _tcpServer = new WatsonTcpServer(options.IpAddress, options.Port);
+            _tcpServer = options.Tls is { } tls
+                ? BuildTlsServer(options.IpAddress, options.Port, tls)
+                : new WatsonTcpServer(options.IpAddress, options.Port);
             _tcpServer.Events.MessageReceived += OnMessageReceived;
             _tcpServer.Events.ClientConnected += OnClientConnected;
             _tcpServer.Events.ClientDisconnected += OnClientDisconnected;
+        }
+
+        private static WatsonTcpServer BuildTlsServer(string ip, int port, RpcServerTlsOptions tls)
+        {
+            WatsonTcp.TlsVersion tlsVer = tls.TlsVersion == RpcTlsVersion.Tls12
+                ? WatsonTcp.TlsVersion.Tls12
+                : WatsonTcp.TlsVersion.Tls13;
+
+            WatsonTcpServer server;
+            if (tls.Certificate is not null)
+                server = new WatsonTcpServer(ip, port, tls.Certificate, tlsVer);
+            else if (tls.PfxPath is not null)
+                server = new WatsonTcpServer(ip, port, tls.PfxPath, tls.PfxPassword ?? string.Empty, tlsVer);
+            else
+                throw new ArgumentException(
+                    $"{nameof(RpcServerTlsOptions)}.{nameof(RpcServerTlsOptions.Certificate)} or " +
+                    $"{nameof(RpcServerTlsOptions.PfxPath)} must be set when TLS is enabled.", nameof(tls));
+
+            server.SslConfiguration.ClientCertificateRequired = tls.RequireClientCertificate;
+            if (tls.ClientCertificateValidation is not null)
+                server.SslConfiguration.ClientCertificateValidationCallback = tls.ClientCertificateValidation;
+
+            return server;
         }
 
         public void Start() => _tcpServer.Start();
@@ -169,7 +194,18 @@ namespace RpcWatsonTcp
             _tcpServer.Events.MessageReceived -= OnMessageReceived;
             _tcpServer.Events.ClientConnected -= OnClientConnected;
             _tcpServer.Events.ClientDisconnected -= OnClientDisconnected;
-            await Task.Run(() => _tcpServer.Dispose());
+            try
+            {
+                await Task.Run(() => _tcpServer.Dispose());
+            }
+            catch (Exception ex) when (IsCancellationFromWatsonTcp(ex)) { }
         }
+
+        // WatsonTcp TLS cleanup internally calls Task.Wait() on canceled tasks, surfacing either a
+        // TaskCanceledException or an AggregateException wrapping one. Suppress those silently.
+        private static bool IsCancellationFromWatsonTcp(Exception ex) =>
+            ex is OperationCanceledException ||
+            (ex is AggregateException agg &&
+             agg.InnerExceptions.All(e => e is OperationCanceledException));
     }
 }
