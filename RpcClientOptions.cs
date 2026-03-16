@@ -8,12 +8,20 @@ namespace RpcWatsonTcp
         public int ServerPort { get; set; } = 9000;
 
         /// <summary>
-        /// Optional pre-shared key returned to the server during the WatsonTcp authentication
-        /// handshake. Must match <see cref="RpcServerOptions.PresharedKey"/> on the server when
-        /// that option is set. Leave <see langword="null"/> (the default) to skip authentication.
+        /// Optional provider that supplies serialized credentials for the application-layer
+        /// authentication handshake. When set, <see cref="RpcClient.ConnectAsync"/> sends the
+        /// credentials immediately after establishing the TCP connection and awaits the server's
+        /// response before any RPC calls proceed.
+        /// <para>
+        /// Use <see cref="CredentialProvider{TCredential}"/> to create a typed instance:
+        /// <code>
+        /// opt.CredentialProvider = new CredentialProvider&lt;ApiKeyCredential&gt;(
+        ///     () => new ApiKeyCredential { Key = "my-key" });
+        /// </code>
+        /// </para>
+        /// Leave <see langword="null"/> (the default) to skip authentication.
         /// </summary>
-        /// <remarks>WatsonTcp requires the key to be exactly 16 characters.</remarks>
-        public string? PresharedKey { get; set; }
+        public ICredentialProvider? CredentialProvider { get; set; }
 
         /// <summary>
         /// Optional Polly v8 resilience pipeline applied to every <c>SendAsync</c> call.

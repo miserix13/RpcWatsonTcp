@@ -15,3 +15,10 @@ public partial class PingReply : IReply
 {
     public string Echo { get; set; } = string.Empty;
 }
+
+// Shared credential type used across authentication tests.
+[GenerateShape]
+public partial class ApiKeyCredential : ICredential
+{
+    public string ApiKey { get; set; } = string.Empty;
+}

@@ -20,5 +20,9 @@ namespace RpcWatsonTcp
         /// <summary>True when <see cref="Payload"/> contains an <see cref="RpcErrorReply"/>.</summary>
         [Key(3)]
         public bool IsError { get; set; }
+
+        /// <summary>True when this envelope carries an application-layer authentication request or reply.</summary>
+        [Key(4)]
+        public bool IsAuth { get; set; }
     }
 }

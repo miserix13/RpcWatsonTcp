@@ -12,43 +12,88 @@ namespace RpcWatsonTcp
     {
         private readonly WatsonTcpClient _tcpClient;
         private readonly ResiliencePipeline? _pipeline;
+        private readonly ICredentialProvider? _credentialProvider;
         private readonly ConcurrentDictionary<Guid, TaskCompletionSource<RpcEnvelope>> _pending = new();
+        private readonly TaskCompletionSource<bool>? _authTcs;
+        private readonly Task _authReady;
         private int _disposed;
+
+        /// <summary>Raised when the server confirms the client's credentials are valid.</summary>
+        public event EventHandler? AuthenticationSucceeded;
+
+        /// <summary>Raised when the server rejects the client's credentials.</summary>
+        public event EventHandler? AuthenticationFailed;
 
         public RpcClient(RpcClientOptions options)
         {
             _pipeline = options.ResiliencePipeline;
+            _credentialProvider = options.CredentialProvider;
             _tcpClient = new WatsonTcpClient(options.ServerIpAddress, options.ServerPort);
-
-            if (options.PresharedKey is not null)
-            {
-                if (options.PresharedKey.Length != 16)
-                    throw new ArgumentException("PresharedKey must be exactly 16 characters.", nameof(options));
-                _tcpClient.Settings.PresharedKey = options.PresharedKey;
-                _tcpClient.Callbacks.AuthenticationRequested = () => options.PresharedKey;
-            }
-
             _tcpClient.Events.MessageReceived += OnMessageReceived;
-            _tcpClient.Events.AuthenticationSucceeded += OnAuthenticationSucceeded;
-            _tcpClient.Events.AuthenticationFailure += OnAuthenticationFailed;
+            _tcpClient.Events.ServerConnected += OnServerConnected;
+
+            if (_credentialProvider is not null)
+            {
+                _authTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _authReady = _authTcs.Task;
+            }
+            else
+            {
+                _authReady = Task.CompletedTask;
+            }
         }
 
+        /// <summary>
+        /// Establishes the TCP connection. When <see cref="RpcClientOptions.CredentialProvider"/>
+        /// is configured, sends credentials immediately but does not wait for the server's reply.
+        /// Use <see cref="ConnectAsync"/> to await authentication completion before proceeding.
+        /// </summary>
         public void Connect() => _tcpClient.Connect();
 
-        /// <summary>Raised when the server confirms this client's preshared key is correct.</summary>
-        public event EventHandler? AuthenticationSucceeded;
+        /// <summary>
+        /// Establishes the TCP connection and, when <see cref="RpcClientOptions.CredentialProvider"/>
+        /// is configured, waits for the server to accept or reject credentials before returning.
+        /// Throws <see cref="RpcException"/> if authentication fails.
+        /// </summary>
+        public async Task ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            _tcpClient.Connect();
+            await _authReady.WaitAsync(cancellationToken);
+        }
 
-        /// <summary>Raised when the server rejects this client's preshared key.</summary>
-        public event EventHandler? AuthenticationFailed;
+        private void OnServerConnected(object? sender, ConnectionEventArgs e)
+        {
+            if (_credentialProvider is null) return;
+            _ = SendAuthEnvelopeAsync();
+        }
+
+        private async Task SendAuthEnvelopeAsync()
+        {
+            try
+            {
+                var envelope = new RpcEnvelope
+                {
+                    MessageId = Guid.NewGuid(),
+                    TypeName = _credentialProvider!.CredentialTypeName,
+                    Payload = _credentialProvider.GetSerializedPayload(),
+                    IsAuth = true
+                };
+                await _tcpClient.SendAsync(RpcSerializer.SerializeEnvelope(envelope));
+            }
+            catch (Exception ex)
+            {
+                _authTcs?.TrySetException(ex);
+            }
+        }
 
         /// <summary>
         /// Sends <paramref name="request"/> to the server and returns the typed reply.
+        /// If <see cref="RpcClientOptions.CredentialProvider"/> is configured, waits for the
+        /// authentication handshake to complete first.
         /// If <see cref="RpcClientOptions.ResiliencePipeline"/> is configured, the call is
         /// wrapped in that pipeline (retry / circuit breaker / timeout).
-        /// <typeparamref name="TRequest"/> and <typeparamref name="TReply"/> must be annotated
-        /// with <c>[GenerateShape]</c> from PolyType so Nerdbank.MessagePack can serialize them.
         /// </summary>
-        /// <exception cref="RpcException">Thrown when the server handler raises an exception.</exception>
+        /// <exception cref="RpcException">Thrown when the server handler raises an exception or when authentication fails.</exception>
         public Task<TReply> SendAsync<TRequest, TReply>(
             TRequest request,
             CancellationToken cancellationToken = default)
@@ -69,6 +114,9 @@ namespace RpcWatsonTcp
             where TRequest : IRequest, IShapeable<TRequest>
             where TReply : IReply, IShapeable<TReply>
         {
+            // Wait for authentication to complete (no-op when no credentials are configured).
+            await _authReady.WaitAsync(cancellationToken);
+
             var messageId = Guid.NewGuid();
             var tcs = new TaskCompletionSource<RpcEnvelope>(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -116,12 +164,6 @@ namespace RpcWatsonTcp
         internal Task SendRawAsync(byte[] envelopeBytes) =>
             _tcpClient.SendAsync(envelopeBytes);
 
-        private void OnAuthenticationSucceeded(object? sender, EventArgs e) =>
-            AuthenticationSucceeded?.Invoke(this, EventArgs.Empty);
-
-        private void OnAuthenticationFailed(object? sender, EventArgs e) =>
-            AuthenticationFailed?.Invoke(this, EventArgs.Empty);
-
         private void OnMessageReceived(object? sender, MessageReceivedEventArgs e)
         {
             RpcEnvelope envelope;
@@ -134,9 +176,34 @@ namespace RpcWatsonTcp
                 return; // Malformed reply — discard.
             }
 
+            if (envelope.IsAuth)
+            {
+                HandleAuthReply(envelope);
+                return;
+            }
+
             if (_pending.TryRemove(envelope.MessageId, out TaskCompletionSource<RpcEnvelope>? tcs))
                 tcs.TrySetResult(envelope);
             // No TCS found → reply was for a fire-and-forget drain replay; discard silently.
+        }
+
+        private void HandleAuthReply(RpcEnvelope envelope)
+        {
+            if (envelope.IsError)
+            {
+                var ex = new RpcException(new RpcErrorReply
+                {
+                    Message = "Authentication failed.",
+                    ExceptionType = typeof(RpcException).FullName
+                });
+                _authTcs?.TrySetException(ex);
+                AuthenticationFailed?.Invoke(this, EventArgs.Empty);
+            }
+            else
+            {
+                _authTcs?.TrySetResult(true);
+                AuthenticationSucceeded?.Invoke(this, EventArgs.Empty);
+            }
         }
 
         public async ValueTask DisposeAsync()
@@ -145,8 +212,7 @@ namespace RpcWatsonTcp
                 return;
 
             _tcpClient.Events.MessageReceived -= OnMessageReceived;
-            _tcpClient.Events.AuthenticationSucceeded -= OnAuthenticationSucceeded;
-            _tcpClient.Events.AuthenticationFailure -= OnAuthenticationFailed;
+            _tcpClient.Events.ServerConnected -= OnServerConnected;
 
             foreach (var tcs in _pending.Values)
                 tcs.TrySetCanceled();

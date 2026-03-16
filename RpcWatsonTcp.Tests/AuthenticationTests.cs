@@ -4,21 +4,26 @@ using RpcWatsonTcp;
 namespace RpcWatsonTcp.Tests;
 
 /// <summary>
-/// Tests for the authentication extensibility points: PresharedKey option and the
-/// ClientConnected / ClientDisconnected / AuthenticationSucceeded / AuthenticationFailed events.
+/// Tests for the generic application-layer authentication extensibility points:
+/// ICredential / IRpcAuthenticator / ICredentialProvider, the
+/// ClientConnected / ClientDisconnected / AuthenticationSucceeded / AuthenticationFailed events,
+/// and the _authReady gate inside RpcClient.SendAsync.
 /// </summary>
 public class AuthenticationTests
 {
     private static int _nextPort = 19700;
     private static int NextPort() => Interlocked.Increment(ref _nextPort);
 
-    // ── Connection lifecycle events ──────────────────────────────────────────
+    const string ValidKey = "valid-api-key";
+    const string WrongKey = "wrong-api-key";
+
+    // ── Connection lifecycle events (no auth configured) ─────────────────────
 
     [Fact]
     public async Task ClientConnected_Event_FiresWhenClientConnects()
     {
         int port = NextPort();
-        await using RpcServer server = BuildServer(port, presharedKey: null);
+        await using RpcServer server = BuildServer(port, requireAuth: false);
         server.Start();
 
         var tcs = new TaskCompletionSource<RpcClientConnectedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -36,7 +41,7 @@ public class AuthenticationTests
     public async Task ClientDisconnected_Event_FiresWhenClientDisconnects()
     {
         int port = NextPort();
-        await using RpcServer server = BuildServer(port, presharedKey: null);
+        await using RpcServer server = BuildServer(port, requireAuth: false);
         server.Start();
 
         var connected = new TaskCompletionSource<Guid>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -49,7 +54,6 @@ public class AuthenticationTests
         client.Connect();
         await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        // Disposing the client closes the TCP connection.
         await client.DisposeAsync();
 
         RpcClientDisconnectedEventArgs args = await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -57,52 +61,35 @@ public class AuthenticationTests
         Assert.False(string.IsNullOrEmpty(args.Reason));
     }
 
-    // ── Preshared key — happy path ───────────────────────────────────────────
+    // ── No auth configured — passthrough ─────────────────────────────────────
 
     [Fact]
-    public async Task PresharedKey_MatchingKey_ClientCanSendRpc()
+    public async Task NoAuth_Client_CanSendRpcWithoutCredentials()
     {
         int port = NextPort();
-        const string key = "super-secret-key"; // exactly 16 chars
-
-        await using RpcServer server = BuildServer(port, presharedKey: key);
+        await using RpcServer server = BuildServer(port, requireAuth: false);
         server.Start();
 
-        await using RpcClient client = new(new RpcClientOptions
-        {
-            ServerIpAddress = "127.0.0.1",
-            ServerPort = port,
-            PresharedKey = key
-        });
-
-        // Wait for the async auth handshake to complete before sending RPCs.
-        var authReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        client.AuthenticationSucceeded += (_, _) => authReady.TrySetResult(true);
+        await using RpcClient client = new(new RpcClientOptions { ServerIpAddress = "127.0.0.1", ServerPort = port });
         client.Connect();
-        await authReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        PingReply reply = await client.SendAsync<PingRequest, PingReply>(new PingRequest { Message = "auth-test" });
-        Assert.Equal("auth-test", reply.Echo);
+        PingReply reply = await client.SendAsync<PingRequest, PingReply>(new PingRequest { Message = "hi" });
+        Assert.Equal("hi", reply.Echo);
     }
 
+    // ── Valid credentials — happy path ────────────────────────────────────────
+
     [Fact]
-    public async Task PresharedKey_MatchingKey_ServerRaisesAuthenticationSucceeded()
+    public async Task ValidCredential_ServerRaisesAuthenticationSucceeded()
     {
         int port = NextPort();
-        const string key = "serverauthkey123"; // exactly 16 chars
-
-        await using RpcServer server = BuildServer(port, presharedKey: key);
+        await using RpcServer server = BuildServer(port, requireAuth: true);
         server.Start();
 
         var authOk = new TaskCompletionSource<RpcAuthenticationSucceededEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
         server.AuthenticationSucceeded += (_, e) => authOk.TrySetResult(e);
 
-        await using RpcClient client = new(new RpcClientOptions
-        {
-            ServerIpAddress = "127.0.0.1",
-            ServerPort = port,
-            PresharedKey = key
-        });
+        await using RpcClient client = BuildClient(port, apiKey: ValidKey);
         client.Connect();
 
         RpcAuthenticationSucceededEventArgs args = await authOk.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -111,49 +98,63 @@ public class AuthenticationTests
     }
 
     [Fact]
-    public async Task PresharedKey_MatchingKey_ClientRaisesAuthenticationSucceeded()
+    public async Task ValidCredential_ClientRaisesAuthenticationSucceeded()
     {
         int port = NextPort();
-        const string key = "clientauthkey123"; // exactly 16 chars
-
-        await using RpcServer server = BuildServer(port, presharedKey: key);
+        await using RpcServer server = BuildServer(port, requireAuth: true);
         server.Start();
 
-        await using RpcClient client = new(new RpcClientOptions
-        {
-            ServerIpAddress = "127.0.0.1",
-            ServerPort = port,
-            PresharedKey = key
-        });
+        await using RpcClient client = BuildClient(port, apiKey: ValidKey);
 
         var authOk = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         client.AuthenticationSucceeded += (_, _) => authOk.TrySetResult(true);
-
         client.Connect();
-        bool succeeded = await authOk.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.True(succeeded);
+
+        Assert.True(await authOk.Task.WaitAsync(TimeSpan.FromSeconds(5)));
     }
 
-    // ── Preshared key — failure path ─────────────────────────────────────────
-
     [Fact]
-    public async Task PresharedKey_WrongKey_ServerRaisesAuthenticationFailed()
+    public async Task ValidCredential_ConnectAsync_ThenRpcSucceeds()
     {
         int port = NextPort();
+        await using RpcServer server = BuildServer(port, requireAuth: true);
+        server.Start();
 
-        await using RpcServer server = BuildServer(port, presharedKey: "correctpassword!"); // 16 chars
+        await using RpcClient client = BuildClient(port, apiKey: ValidKey);
+        await client.ConnectAsync();
+
+        PingReply reply = await client.SendAsync<PingRequest, PingReply>(new PingRequest { Message = "authenticated" });
+        Assert.Equal("authenticated", reply.Echo);
+    }
+
+    [Fact]
+    public async Task ValidCredential_SendAsync_AutomaticallyAwaitsAuthBeforeSending()
+    {
+        int port = NextPort();
+        await using RpcServer server = BuildServer(port, requireAuth: true);
+        server.Start();
+
+        await using RpcClient client = BuildClient(port, apiKey: ValidKey);
+
+        // Call Connect() (not ConnectAsync) — SendAsync must still gate on auth internally.
+        client.Connect();
+        PingReply reply = await client.SendAsync<PingRequest, PingReply>(new PingRequest { Message = "gated" });
+        Assert.Equal("gated", reply.Echo);
+    }
+
+    // ── Invalid credentials — failure path ────────────────────────────────────
+
+    [Fact]
+    public async Task InvalidCredential_ServerRaisesAuthenticationFailed()
+    {
+        int port = NextPort();
+        await using RpcServer server = BuildServer(port, requireAuth: true);
         server.Start();
 
         var authFailed = new TaskCompletionSource<RpcAuthenticationFailedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
         server.AuthenticationFailed += (_, e) => authFailed.TrySetResult(e);
 
-        // Client intentionally provides a wrong key (must still be 16 chars).
-        RpcClient client = new(new RpcClientOptions
-        {
-            ServerIpAddress = "127.0.0.1",
-            ServerPort = port,
-            PresharedKey = "wrongpassword123" // 16 chars, wrong value
-        });
+        RpcClient client = BuildClient(port, apiKey: WrongKey);
         client.Connect();
 
         RpcAuthenticationFailedEventArgs args = await authFailed.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -163,51 +164,82 @@ public class AuthenticationTests
     }
 
     [Fact]
-    public async Task PresharedKey_WrongKey_ClientRaisesAuthenticationFailed()
+    public async Task InvalidCredential_ClientRaisesAuthenticationFailed()
     {
         int port = NextPort();
-
-        await using RpcServer server = BuildServer(port, presharedKey: "correctpassword!"); // 16 chars
+        await using RpcServer server = BuildServer(port, requireAuth: true);
         server.Start();
 
-        RpcClient client = new(new RpcClientOptions
-        {
-            ServerIpAddress = "127.0.0.1",
-            ServerPort = port,
-            PresharedKey = "wrongpassword123" // 16 chars, wrong value
-        });
+        RpcClient client = BuildClient(port, apiKey: WrongKey);
 
         var authFailed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         client.AuthenticationFailed += (_, _) => authFailed.TrySetResult(true);
-
         client.Connect();
-        bool fired = await authFailed.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.True(fired);
 
+        Assert.True(await authFailed.Task.WaitAsync(TimeSpan.FromSeconds(5)));
         await client.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task InvalidCredential_ConnectAsync_Throws()
+    {
+        int port = NextPort();
+        await using RpcServer server = BuildServer(port, requireAuth: true);
+        server.Start();
+
+        await using RpcClient client = BuildClient(port, apiKey: WrongKey);
+        await Assert.ThrowsAsync<RpcException>(() => client.ConnectAsync());
+    }
+
+    [Fact]
+    public async Task InvalidCredential_SendAsync_Throws()
+    {
+        int port = NextPort();
+        await using RpcServer server = BuildServer(port, requireAuth: true);
+        server.Start();
+
+        // Connect() without awaiting — SendAsync must propagate the auth failure.
+        await using RpcClient client = BuildClient(port, apiKey: WrongKey);
+        client.Connect();
+
+        await Assert.ThrowsAsync<RpcException>(() =>
+            client.SendAsync<PingRequest, PingReply>(new PingRequest { Message = "should fail" }));
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static RpcServer BuildServer(int port, string? presharedKey)
+    private static RpcServer BuildServer(int port, bool requireAuth)
     {
         var services = new ServiceCollection();
-        services.AddRpcServer(opt =>
-        {
-            opt.IpAddress = "127.0.0.1";
-            opt.Port = port;
-            opt.PresharedKey = presharedKey;
-        });
+        services.AddRpcServer(opt => { opt.IpAddress = "127.0.0.1"; opt.Port = port; });
         services.AddRpcHandler<PingRequest, PingReply, EchoHandler>();
+
+        if (requireAuth)
+            services.AddRpcAuthentication<ApiKeyCredential, ApiKeyAuthenticator>();
 
         IServiceProvider sp = services.BuildServiceProvider();
         sp.ApplyRpcHandlerRegistrations();
         return sp.GetRequiredService<RpcServer>();
     }
 
+    private static RpcClient BuildClient(int port, string apiKey) =>
+        new(new RpcClientOptions
+        {
+            ServerIpAddress = "127.0.0.1",
+            ServerPort = port,
+            CredentialProvider = new CredentialProvider<ApiKeyCredential>(
+                () => new ApiKeyCredential { ApiKey = apiKey })
+        });
+
     private sealed class EchoHandler : IHandler<PingRequest, PingReply>
     {
         public Task<PingReply> HandleAsync(PingRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new PingReply { Echo = request.Message });
+    }
+
+    private sealed class ApiKeyAuthenticator : IRpcAuthenticator<ApiKeyCredential>
+    {
+        public Task<bool> AuthenticateAsync(ApiKeyCredential credential, CancellationToken cancellationToken = default)
+            => Task.FromResult(credential.ApiKey == ValidKey);
     }
 }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 using PolyType;
 using WatsonTcp;
@@ -14,60 +15,56 @@ namespace RpcWatsonTcp
         private readonly WatsonTcpServer _tcpServer;
         private readonly IHandlerRegistry _registry;
         private readonly IServiceProvider _serviceProvider;
+        private readonly RpcCredentialRegistry _credentials;
 
-        /// <summary>Raised when a client establishes a TCP connection (after authentication, if a preshared key is configured).</summary>
+        // Tracks per-client authentication state. True = authenticated (or no auth required).
+        private readonly ConcurrentDictionary<Guid, bool> _clientAuth = new();
+
+        /// <summary>Raised when a client establishes a TCP connection.</summary>
         public event EventHandler<RpcClientConnectedEventArgs>? ClientConnected;
 
-        /// <summary>Raised when a client disconnects. <see cref="RpcClientDisconnectedEventArgs.Reason"/> is <c>AuthFailure</c> when the client failed authentication.</summary>
+        /// <summary>Raised when a client disconnects.</summary>
         public event EventHandler<RpcClientDisconnectedEventArgs>? ClientDisconnected;
 
-        /// <summary>Raised when a client successfully authenticates using <see cref="RpcServerOptions.PresharedKey"/>.</summary>
+        /// <summary>Raised when a client successfully completes the application-layer authentication handshake.</summary>
         public event EventHandler<RpcAuthenticationSucceededEventArgs>? AuthenticationSucceeded;
 
-        /// <summary>Raised when a client fails authentication because it supplied an incorrect or missing preshared key.</summary>
+        /// <summary>Raised when a client fails the application-layer authentication handshake.</summary>
         public event EventHandler<RpcAuthenticationFailedEventArgs>? AuthenticationFailed;
 
         public RpcServer(RpcServerOptions options, IServiceProvider serviceProvider)
         {
             _serviceProvider = serviceProvider;
             _registry = serviceProvider.GetRequiredService<IHandlerRegistry>();
+            _credentials = serviceProvider.GetRequiredService<RpcCredentialRegistry>();
             _tcpServer = new WatsonTcpServer(options.IpAddress, options.Port);
-
-            if (options.PresharedKey is not null)
-            {
-                if (options.PresharedKey.Length != 16)
-                    throw new ArgumentException("PresharedKey must be exactly 16 characters.", nameof(options));
-                _tcpServer.Settings.PresharedKey = options.PresharedKey;
-            }
-
             _tcpServer.Events.MessageReceived += OnMessageReceived;
             _tcpServer.Events.ClientConnected += OnClientConnected;
             _tcpServer.Events.ClientDisconnected += OnClientDisconnected;
-            _tcpServer.Events.AuthenticationSucceeded += OnAuthenticationSucceeded;
-            _tcpServer.Events.AuthenticationFailed += OnAuthenticationFailed;
         }
 
         public void Start() => _tcpServer.Start();
 
-        private void OnClientConnected(object? sender, ConnectionEventArgs e) =>
+        private void OnClientConnected(object? sender, ConnectionEventArgs e)
+        {
+            // Mark as authenticated immediately when no auth is configured.
+            _clientAuth[e.Client.Guid] = !_credentials.RequiresAuthentication;
             ClientConnected?.Invoke(this, new RpcClientConnectedEventArgs(e.Client.Guid, e.Client.IpPort));
+        }
 
-        private void OnClientDisconnected(object? sender, DisconnectionEventArgs e) =>
-            ClientDisconnected?.Invoke(this, new RpcClientDisconnectedEventArgs(e.Client.Guid, e.Client.IpPort, e.Reason.ToString()));
-
-        private void OnAuthenticationSucceeded(object? sender, AuthenticationSucceededEventArgs e) =>
-            AuthenticationSucceeded?.Invoke(this, new RpcAuthenticationSucceededEventArgs(e.Client.Guid, e.Client.IpPort));
-
-        private void OnAuthenticationFailed(object? sender, AuthenticationFailedEventArgs e) =>
-            AuthenticationFailed?.Invoke(this, new RpcAuthenticationFailedEventArgs(e.IpPort));
+        private void OnClientDisconnected(object? sender, DisconnectionEventArgs e)
+        {
+            _clientAuth.TryRemove(e.Client.Guid, out _);
+            ClientDisconnected?.Invoke(this, new RpcClientDisconnectedEventArgs(
+                e.Client.Guid, e.Client.IpPort, e.Reason.ToString()));
+        }
 
         private void OnMessageReceived(object? sender, MessageReceivedEventArgs e)
         {
-            // Fire-and-forget per message; errors are caught inside DispatchAndReplyAsync.
-            _ = DispatchAndReplyAsync(e.Client.Guid, e.Data);
+            _ = DispatchAndReplyAsync(e.Client.Guid, e.Client.IpPort, e.Data);
         }
 
-        private async Task DispatchAndReplyAsync(Guid clientGuid, byte[] data)
+        private async Task DispatchAndReplyAsync(Guid clientGuid, string ipPort, byte[] data)
         {
             RpcEnvelope requestEnvelope;
             try
@@ -76,7 +73,31 @@ namespace RpcWatsonTcp
             }
             catch
             {
-                // Malformed envelope — cannot reply without a MessageId.
+                return; // Malformed envelope — cannot reply without a MessageId.
+            }
+
+            if (requestEnvelope.IsAuth)
+            {
+                await HandleAuthEnvelopeAsync(clientGuid, ipPort, requestEnvelope);
+                return;
+            }
+
+            // Reject unauthenticated RPC calls when auth is required.
+            if (!_clientAuth.GetValueOrDefault(clientGuid, false))
+            {
+                var errorReply = new RpcErrorReply
+                {
+                    Message = "Authentication required. Send credentials before issuing RPC calls.",
+                    ExceptionType = typeof(RpcException).FullName
+                };
+                var rejectEnvelope = new RpcEnvelope
+                {
+                    MessageId = requestEnvelope.MessageId,
+                    TypeName = typeof(RpcErrorReply).AssemblyQualifiedName!,
+                    Payload = RpcSerializer.SerializeErrorReply(errorReply),
+                    IsError = true
+                };
+                await _tcpServer.SendAsync(clientGuid, RpcSerializer.SerializeEnvelope(rejectEnvelope));
                 return;
             }
 
@@ -111,8 +132,36 @@ namespace RpcWatsonTcp
                 IsError = isError
             };
 
-            byte[] replyBytes = RpcSerializer.SerializeEnvelope(replyEnvelope);
-            await _tcpServer.SendAsync(clientGuid, replyBytes);
+            await _tcpServer.SendAsync(clientGuid, RpcSerializer.SerializeEnvelope(replyEnvelope));
+        }
+
+        private async Task HandleAuthEnvelopeAsync(Guid clientGuid, string ipPort, RpcEnvelope authEnvelope)
+        {
+            bool success = false;
+            try
+            {
+                ICredentialValidator? validator = _credentials.Resolve(authEnvelope.TypeName);
+                if (validator is not null)
+                    success = await validator.ValidateAsync(authEnvelope.Payload, CancellationToken.None);
+            }
+            catch { }
+
+            _clientAuth[clientGuid] = success;
+
+            var reply = new RpcEnvelope
+            {
+                MessageId = authEnvelope.MessageId,
+                IsAuth = true,
+                IsError = !success
+            };
+            await _tcpServer.SendAsync(clientGuid, RpcSerializer.SerializeEnvelope(reply));
+
+            if (success)
+                AuthenticationSucceeded?.Invoke(this,
+                    new RpcAuthenticationSucceededEventArgs(clientGuid, ipPort));
+            else
+                AuthenticationFailed?.Invoke(this,
+                    new RpcAuthenticationFailedEventArgs(ipPort));
         }
 
         public async ValueTask DisposeAsync()
@@ -120,8 +169,6 @@ namespace RpcWatsonTcp
             _tcpServer.Events.MessageReceived -= OnMessageReceived;
             _tcpServer.Events.ClientConnected -= OnClientConnected;
             _tcpServer.Events.ClientDisconnected -= OnClientDisconnected;
-            _tcpServer.Events.AuthenticationSucceeded -= OnAuthenticationSucceeded;
-            _tcpServer.Events.AuthenticationFailed -= OnAuthenticationFailed;
             await Task.Run(() => _tcpServer.Dispose());
         }
     }

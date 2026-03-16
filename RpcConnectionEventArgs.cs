@@ -39,8 +39,8 @@ namespace RpcWatsonTcp
     }
 
     /// <summary>
-    /// Raised on the <see cref="RpcServer"/> when a client successfully authenticates using the
-    /// configured <see cref="RpcServerOptions.PresharedKey"/>.
+    /// Raised on the <see cref="RpcServer"/> when a client successfully completes the
+    /// application-layer authentication handshake.
     /// </summary>
     public sealed class RpcAuthenticationSucceededEventArgs : EventArgs
     {
@@ -58,8 +58,8 @@ namespace RpcWatsonTcp
     }
 
     /// <summary>
-    /// Raised on the <see cref="RpcServer"/> when a client fails authentication because it supplied
-    /// an incorrect or missing <see cref="RpcServerOptions.PresharedKey"/>.
+    /// Raised on the <see cref="RpcServer"/> when a client fails the application-layer
+    /// authentication handshake (invalid or unrecognized credentials).
     /// </summary>
     public sealed class RpcAuthenticationFailedEventArgs : EventArgs
     {

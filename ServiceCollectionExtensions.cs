@@ -21,14 +21,32 @@ namespace RpcWatsonTcp
             services.AddSingleton<DependencyInjectionHandlerRegistry>();
             services.AddSingleton<IHandlerRegistry>(sp =>
                 sp.GetRequiredService<DependencyInjectionHandlerRegistry>());
+            services.AddSingleton<RpcCredentialRegistry>();
             services.AddSingleton<RpcServer>();
 
             return services;
         }
 
         /// <summary>
-        /// Registers an <see cref="RpcClient"/> for use via dependency injection.
+        /// Registers an <see cref="IRpcAuthenticator{TCredential}"/> on the server for
+        /// application-layer authentication. Clients must send a matching
+        /// <typeparamref name="TCredential"/> via <see cref="RpcClientOptions.CredentialProvider"/>
+        /// before their RPC calls will be processed.
         /// </summary>
+        public static IServiceCollection AddRpcAuthentication<TCredential, TAuthenticator>(
+            this IServiceCollection services)
+            where TCredential : ICredential, IShapeable<TCredential>
+            where TAuthenticator : class, IRpcAuthenticator<TCredential>
+        {
+            services.AddTransient<IRpcAuthenticator<TCredential>, TAuthenticator>();
+            services.AddSingleton<ICredentialValidator>(sp =>
+                new CredentialValidator<TCredential>(
+                    sp.GetRequiredService<IRpcAuthenticator<TCredential>>()));
+            return services;
+        }
+
+        /// <summary>
+        /// Registers an <see cref="RpcClient"/> for use via dependency injection.</summary>
         public static IServiceCollection AddRpcClient(
             this IServiceCollection services,
             Action<RpcClientOptions> configure)

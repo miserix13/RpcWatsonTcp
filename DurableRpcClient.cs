@@ -41,7 +41,7 @@ namespace RpcWatsonTcp
         /// </summary>
         public async Task ConnectAsync(CancellationToken cancellationToken = default)
         {
-            _inner.Connect();
+            await _inner.ConnectAsync(cancellationToken);
 
             if (_drainOnConnect)
                 await DrainOutboxAsync(cancellationToken);

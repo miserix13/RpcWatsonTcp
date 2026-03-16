@@ -124,68 +124,98 @@ catch (RpcException ex)
 
 ## Authentication
 
-RpcWatsonTcp exposes WatsonTcp's built-in preshared-key authentication as a first-class opt-in feature.
+RpcWatsonTcp provides a fully application-layer authentication extensibility point using generic credential types. This bypasses WatsonTcp's built-in preshared-key mechanism entirely, giving you complete control over credential shape and validation logic.
 
-> **Key constraint:** WatsonTcp requires the preshared key to be **exactly 16 characters**.
+When authentication is configured, the client sends credentials immediately after the TCP connection is established. The server validates them and replies before any RPC calls are processed. `SendAsync` automatically gates on this handshake — no ordering concerns at the call site.
 
-### Preshared key
-
-Set the same `PresharedKey` on both the server and the client. The server will reject any client that presents the wrong key or no key at all.
+### 1. Define a credential type
 
 ```csharp
-// Server — requires all clients to authenticate
-services.AddRpcServer(opt =>
-{
-    opt.IpAddress = "0.0.0.0";
-    opt.Port = 9000;
-    opt.PresharedKey = "my16charpassword"; // exactly 16 chars
-});
+using PolyType;
+using RpcWatsonTcp;
 
-// Client — provides the matching key during the WatsonTcp handshake
+[GenerateShape]
+public partial class ApiKeyCredential : ICredential
+{
+    public string ApiKey { get; set; } = string.Empty;
+}
+```
+
+The type must implement `ICredential` and be annotated with `[GenerateShape]` (same as request/reply types).
+
+### 2. Implement a server-side authenticator
+
+```csharp
+public class ApiKeyAuthenticator : IRpcAuthenticator<ApiKeyCredential>
+{
+    public Task<bool> AuthenticateAsync(ApiKeyCredential credential, CancellationToken ct = default)
+        => Task.FromResult(credential.ApiKey == "my-secret-key");
+}
+```
+
+### 3. Register on the server
+
+```csharp
+services.AddRpcServer(opt => { opt.IpAddress = "0.0.0.0"; opt.Port = 9000; });
+services.AddRpcAuthentication<ApiKeyCredential, ApiKeyAuthenticator>();
+services.AddRpcHandler<GetUserRequest, GetUserReply, GetUserHandler>();
+```
+
+When `AddRpcAuthentication` is called, any client that does not successfully authenticate will receive an `RpcException` for every RPC call it attempts.
+
+### 4. Configure the client
+
+```csharp
 var client = new RpcClient(new RpcClientOptions
 {
     ServerIpAddress = "127.0.0.1",
     ServerPort = 9000,
-    PresharedKey = "my16charpassword"
+    CredentialProvider = new CredentialProvider<ApiKeyCredential>(
+        () => new ApiKeyCredential { ApiKey = "my-secret-key" })
 });
 
-// Wait for the async handshake before sending RPCs.
-var authReady = new TaskCompletionSource<bool>();
-client.AuthenticationSucceeded += (_, _) => authReady.TrySetResult(true);
-client.Connect();
-await authReady.Task;
+// ConnectAsync sends credentials and awaits server confirmation before returning.
+await client.ConnectAsync();
+
+// Safe to call — authentication has already completed.
+var reply = await client.SendAsync<GetUserRequest, GetUserReply>(new GetUserRequest { UserId = 1 });
 ```
 
-Leave `PresharedKey` as `null` (the default) to allow unauthenticated connections.
+`Connect()` (non-async) also works — `SendAsync` automatically waits for the handshake before sending:
 
-### Connection lifecycle and auth events
+```csharp
+client.Connect();
+// SendAsync will block internally until the auth reply arrives.
+var reply = await client.SendAsync<GetUserRequest, GetUserReply>(new GetUserRequest { UserId = 1 });
+```
+
+### Authentication events
 
 `RpcServer` exposes four events:
 
 | Event | Type | Raised when |
 |---|---|---|
-| `ClientConnected` | `RpcClientConnectedEventArgs` | A client establishes a connection (after successful auth, if a key is configured) |
-| `ClientDisconnected` | `RpcClientDisconnectedEventArgs` | A client disconnects; `Reason` is `AuthFailure` when authentication failed |
-| `AuthenticationSucceeded` | `RpcAuthenticationSucceededEventArgs` | A client supplied the correct preshared key |
-| `AuthenticationFailed` | `RpcAuthenticationFailedEventArgs` | A client supplied the wrong preshared key |
+| `ClientConnected` | `RpcClientConnectedEventArgs` | A TCP connection is established (before auth completes) |
+| `ClientDisconnected` | `RpcClientDisconnectedEventArgs` | A client disconnects |
+| `AuthenticationSucceeded` | `RpcAuthenticationSucceededEventArgs` | A client's credentials were accepted |
+| `AuthenticationFailed` | `RpcAuthenticationFailedEventArgs` | A client's credentials were rejected |
 
 `RpcClient` exposes two events:
 
 | Event | Raised when |
 |---|---|
-| `AuthenticationSucceeded` | The server confirmed the client's preshared key |
-| `AuthenticationFailed` | The server rejected the client's preshared key |
+| `AuthenticationSucceeded` | The server accepted credentials |
+| `AuthenticationFailed` | The server rejected credentials |
 
 ```csharp
-server.ClientConnected += (_, e) =>
-    Console.WriteLine($"Client {e.IpPort} connected ({e.ClientGuid})");
-
-server.ClientDisconnected += (_, e) =>
-    Console.WriteLine($"Client {e.IpPort} disconnected: {e.Reason}");
+server.AuthenticationSucceeded += (_, e) =>
+    Console.WriteLine($"Client {e.IpPort} authenticated ({e.ClientGuid})");
 
 server.AuthenticationFailed += (_, e) =>
     Console.WriteLine($"Auth failure from {e.IpPort}");
 ```
+
+Leave `CredentialProvider` as `null` (the default) and omit `AddRpcAuthentication` to allow unauthenticated connections.
 
 ---
 
