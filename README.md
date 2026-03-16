@@ -361,30 +361,39 @@ dotnet run --project RpcWatsonTcp.Benchmarks -c Release -- --filter "*"
 
 | Payload | Mean | Error |
 |---|--:|--:|
-| Small (16 B) | 1,635 µs | ±119 µs |
-| Medium (256 B) | 1,934 µs | ±548 µs |
-| Large (4 KB) | 1,899 µs | ±526 µs |
+| Small (16 B) | 1,667 µs | ±142 µs |
+| Medium (256 B) | 1,628 µs | ±87 µs |
+| Large (4 KB) | 1,765 µs | ±154 µs |
 
 Latency is dominated by TCP round-trip overhead. Payload size has a negligible effect.
+
+### Authentication overhead
+
+| Scenario | Mean | Error | vs. baseline |
+|---|--:|--:|--:|
+| No auth (baseline) | 1,648 µs | ±77 µs | — |
+| With auth, post-handshake | 1,671 µs | ±141 µs | +23 µs (+1.4%) |
+
+The auth gate (`_authReady` task) adds ~23 µs of overhead per request — effectively zero overhead once the one-time credential handshake is complete at connect time.
 
 ### Serializer throughput (Nerdbank.MessagePack, single-threaded)
 
 | Operation | Mean | Error |
 |---|--:|--:|
-| Serialize small request | 1.4 µs | ±0.07 µs |
-| Serialize large request (4 KB) | 2.3 µs | ±0.51 µs |
-| Serialize RpcEnvelope | 2.4 µs | ±0.55 µs |
-| Deserialize small request | 2.1 µs | ±0.12 µs |
-| Deserialize large request (4 KB) | 3.7 µs | ±0.72 µs |
-| Deserialize RpcEnvelope | 3.7 µs | ±0.16 µs |
+| Serialize small request | 1.4 µs | ±0.10 µs |
+| Serialize large request (4 KB) | 2.3 µs | ±0.09 µs |
+| Serialize RpcEnvelope | 2.3 µs | ±0.33 µs |
+| Deserialize small request | 2.1 µs | ±0.24 µs |
+| Deserialize large request (4 KB) | 3.3 µs | ±0.26 µs |
+| Deserialize RpcEnvelope | 3.8 µs | ±0.28 µs |
 
 ### Concurrent throughput (N simultaneous round-trips)
 
 | Concurrency | Total time | Mean per request |
 |--:|--:|--:|
-| 1 | 1,712 µs | 1,712 µs |
-| 10 | 13,663 µs | ~1,366 µs |
-| 50 | 58,041 µs | ~1,161 µs |
+| 1 | 1,612 µs | 1,612 µs |
+| 10 | 13,516 µs | ~1,352 µs |
+| 50 | 58,339 µs | ~1,167 µs |
 
 Throughput-per-request improves under concurrency as TCP round-trips overlap.
 

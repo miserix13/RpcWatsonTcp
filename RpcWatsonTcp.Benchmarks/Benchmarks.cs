@@ -135,6 +135,90 @@ public class ConcurrentThroughputBenchmark
 }
 
 /// <summary>
+/// Measures the overhead of the application-layer authentication handshake:
+/// ConnectAsync latency (one-time per connection) and per-request round-trip
+/// when authentication is required vs. not required.
+/// </summary>
+[MemoryDiagnoser]
+[Config(typeof(BenchmarkConfig))]
+public class AuthenticatedRoundTripBenchmark
+{
+    private RpcServer _server = null!;
+    private RpcClient _clientNoAuth = null!;
+    private RpcClient _clientWithAuth = null!;
+    private static int _port = 20300;
+
+    [GlobalSetup]
+    public async Task Setup()
+    {
+        int port = System.Threading.Interlocked.Increment(ref _port);
+        int portAuth = System.Threading.Interlocked.Increment(ref _port);
+
+        // Server without auth
+        var svcNoAuth = new ServiceCollection();
+        svcNoAuth.AddRpcServer(opt => { opt.IpAddress = "127.0.0.1"; opt.Port = port; });
+        svcNoAuth.AddRpcHandler<BenchRequest, BenchReply, EchoHandler>();
+        IServiceProvider spNoAuth = svcNoAuth.BuildServiceProvider();
+        spNoAuth.ApplyRpcHandlerRegistrations();
+        spNoAuth.GetRequiredService<RpcServer>().Start();
+
+        // Server with auth
+        var svcAuth = new ServiceCollection();
+        svcAuth.AddRpcServer(opt => { opt.IpAddress = "127.0.0.1"; opt.Port = portAuth; });
+        svcAuth.AddRpcAuthentication<BenchCredential, TokenAuthenticator>();
+        svcAuth.AddRpcHandler<BenchRequest, BenchReply, EchoHandler>();
+        IServiceProvider spAuth = svcAuth.BuildServiceProvider();
+        spAuth.ApplyRpcHandlerRegistrations();
+        _server = spAuth.GetRequiredService<RpcServer>();
+        _server.Start();
+
+        _clientNoAuth = new RpcClient(new RpcClientOptions { ServerIpAddress = "127.0.0.1", ServerPort = port });
+        _clientNoAuth.Connect();
+
+        _clientWithAuth = new RpcClient(new RpcClientOptions
+        {
+            ServerIpAddress = "127.0.0.1",
+            ServerPort = portAuth,
+            CredentialProvider = new CredentialProvider<BenchCredential>(
+                () => new BenchCredential { Token = "bench-token" })
+        });
+        await _clientWithAuth.ConnectAsync(); // await auth handshake before benchmarking RPCs
+
+        // Warm up both
+        await _clientNoAuth.SendAsync<BenchRequest, BenchReply>(new BenchRequest { Payload = "warm" });
+        await _clientWithAuth.SendAsync<BenchRequest, BenchReply>(new BenchRequest { Payload = "warm" });
+    }
+
+    [GlobalCleanup]
+    public async Task Cleanup()
+    {
+        await _clientNoAuth.DisposeAsync();
+        await _clientWithAuth.DisposeAsync();
+        await _server.DisposeAsync();
+    }
+
+    [Benchmark(Description = "Round-trip: no auth")]
+    public Task<BenchReply> NoAuth() =>
+        _clientNoAuth.SendAsync<BenchRequest, BenchReply>(new BenchRequest { Payload = "hello" });
+
+    [Benchmark(Description = "Round-trip: with auth (post-handshake)")]
+    public Task<BenchReply> WithAuth() =>
+        _clientWithAuth.SendAsync<BenchRequest, BenchReply>(new BenchRequest { Payload = "hello" });
+
+    private sealed class EchoHandler : IHandler<BenchRequest, BenchReply>
+    {
+        public Task<BenchReply> HandleAsync(BenchRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new BenchReply { Echo = request.Payload });
+    }
+
+    private sealed class TokenAuthenticator : IRpcAuthenticator<BenchCredential>
+    {
+        public Task<bool> AuthenticateAsync(BenchCredential credential, CancellationToken cancellationToken = default)
+            => Task.FromResult(credential.Token == "bench-token");
+    }
+}
+
+/// <summary>
 /// Measures pure serialization/deserialization overhead with no network.
 /// </summary>
 [MemoryDiagnoser]
